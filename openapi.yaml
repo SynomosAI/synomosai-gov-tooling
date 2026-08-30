@@ -1,0 +1,164 @@
+openapi: 3.1.0
+info:
+  title: SynomosAI Governance API
+  version: 1.0.0
+  description: 人与 AI 治理 API（最小版）。指纹 FP-MX-B625B4F5BD10
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://localhost:8000
+    description: 本地开发服务（uvicorn nomos_api:app --port 8000）
+  - url: https://api.synomosai
+    description: 生产环境
+paths:
+  /v1/health:
+    get:
+      summary: 健康检查
+      operationId: health_v1_health_get
+      responses:
+        "200":
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  fingerprint:
+                    type: string
+                  ts:
+                    type: string
+  /v1/audit/evidence-chain:
+    post:
+      summary: 生成审计证据链模板（六类证据工件）
+      operationId: audit_evidence_chain_v1_audit_evidence_chain_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvidenceReq'
+      responses:
+        "200":
+          description: 证据链工件模板
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: 请求体无效
+  /v1/a3/assess:
+    post:
+      summary: A³ 四维评分卡评估
+      operationId: a3_assess_v1_a3_assess_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/A3Req'
+      responses:
+        "200":
+          description: 评估结果（含总分与裁决）
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: 请求体无效
+  /v1/passport/{skill_id}:
+    get:
+      summary: 智能体身份码 / 溯源查询
+      operationId: passport_lookup_v1_passport__skill_id__get
+      parameters:
+        - name: skill_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 命中台账
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: 台账未找到该智能体身份码
+  /v1/compliance/checklist:
+    get:
+      summary: 合规清单（EU AI Act 52a / GB/Z 185）
+      operationId: compliance_checklist_v1_compliance_checklist_get
+      responses:
+        "200":
+          description: 合规清单项与注册窗口
+          content:
+            application/json:
+              schema:
+                type: object
+  /v1/gov/scan:
+    post:
+      summary: 治理 / PII / 版权 / 指纹扫描
+      operationId: gov_scan_v1_gov_scan_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanReq'
+      responses:
+        "200":
+          description: 扫描结果（findings / clean / verdict）
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: 请求体无效
+components:
+  schemas:
+    EvidenceReq:
+      type: object
+      properties:
+        system_name:
+          type: string
+          default: AI 系统
+      required:
+        - system_name
+    A3Req:
+      type: object
+      properties:
+        intent:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 3
+        impact:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 3
+        reversibility:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 3
+        oversight:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 3
+      required:
+        - intent
+        - impact
+        - reversibility
+        - oversight
+    ScanReq:
+      type: object
+      properties:
+        text:
+          type: string
+      required:
+        - text

@@ -39,13 +39,21 @@ jobs:
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
           python3 - <<'PY'
           import os, re, json, urllib.request, subprocess, pathlib
 
           REPO=os.environ["REPO"]; PR=os.environ["PR_NUMBER"]; TOK=os.environ["GH_TOKEN"]
           KEY=os.environ["LLM_API_KEY"]; BASE=os.environ["LLM_BASE_URL"].rstrip("/"); MODEL=os.environ["LLM_MODEL"]
+
+          # 未配置 BYOK secrets → 显式告警，消除「绿勾=已审」假安全感（fail-open 不静默）
+          if not (KEY and BASE and MODEL):
+              msg=("**📡 LGD ITU 专项审核**\n\n"
+                   "⚠️ 未配置 LLM secrets（LLM_API_KEY / LLM_BASE_URL / LLM_MODEL），AI 审核未执行。"
+                   "本评论仅为提醒，不阻塞合并。配置后评论 `/itu-review` 重跑。")
+              subprocess.run(["gh","api","-X","POST",f"repos/{REPO}/issues/{PR}/comments","-f",f"body={msg}"])
+              print("itu-review: BYOK not configured, skip"); raise SystemExit(0)
 
           # ITU 规则集（ITU 专家维护）
           rules = pathlib.Path("itu-review-rules.md").read_text(encoding="utf-8") \
@@ -59,7 +67,15 @@ jobs:
           except Exception as e:
               print("itu-review: diff fail", e); raise SystemExit(0)
 
-          hard = re.compile(r"(?i)(<!--\s*内部|须过.{0,6}机器闸|专家终审|canonical pin|zenodo\s*doi|synomosai|medxpert)", re.M)
+          # 递交纪律硬检查：内部流程注释 / 品牌块 / 权利宣告 / ORCID / DOI-pin / Zenodo
+          hard = re.compile(
+              r"(?i)(<!--\s*(内部|草稿|draft|internal|todo|讨论)"
+              r"|须过.{0,6}机器闸|专家终审"
+              r"|canonical[_\s:=]?"
+              r"|10\.5281/zenodo|doi\.org/10\.5281|zenodo\s*doi"
+              r"|orcid|0000-\d{4}-\d{4}-\d{3}[\dX]"
+              r"|copyright|all rights reserved|版权所有|权利声明|©"
+              r"|synomosai|medxpert)", re.M)
           violations = [l for l in diff.splitlines() if hard.search(l)]
           discipline_note = ""
           if violations:

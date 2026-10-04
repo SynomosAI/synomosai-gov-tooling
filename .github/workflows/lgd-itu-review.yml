@@ -2,6 +2,7 @@
 # 仅对 ITU 相关仓/PR 生效：仓名含 'itu' 或仓根存在标记文件 `.lgd-itu`。
 # ITU 专家（standards-participation-officer）负责维护本仓的 itu-review-rules.md。
 # 顺带自动执行「递交纪律」硬检查：拦截内部流程注释 / 品牌块 / DOI-pin 搬入对外贡献。
+# 零外部 action 依赖：不引用 actions/checkout，兼容组织级 "selected actions + SHA pinning" 策略。
 name: lgd-itu-review
 on:
   pull_request:
@@ -22,14 +23,13 @@ jobs:
       pull-requests: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - name: Check ITU scope (skip if not ITU-relevant)
         id: scope
+        env:
+          REPO: ${{ github.repository }}
         run: |
-          if grep -qi "itu" <<< "${{ github.repository }}"; then echo "itu=1" >> "$GITHUB_OUTPUT"; exit 0; fi
-          if [ -f ".lgd-itu" ]; then echo "itu=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if printf '%s' "$REPO" | grep -qi "itu"; then echo "itu=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if gh api "repos/$REPO/contents/.lgd-itu" >/dev/null 2>&1; then echo "itu=1" >> "$GITHUB_OUTPUT"; exit 0; fi
           echo "itu=0" >> "$GITHUB_OUTPUT"
       - name: LGD ITU review (BYOK)
         if: steps.scope.outputs.itu == '1'
@@ -39,27 +39,57 @@ jobs:
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
           python3 - <<'PY'
-          import os, re, json, urllib.request, subprocess, pathlib
+          import os, re, json, urllib.request, subprocess, sys, base64
 
-          REPO=os.environ["REPO"]; PR=os.environ["PR_NUMBER"]; TOK=os.environ["GH_TOKEN"]
+          REPO=os.environ["REPO"]; PR=(os.environ.get("PR_NUMBER") or "").strip()
+          TOK=os.environ["GH_TOKEN"]
           KEY=os.environ["LLM_API_KEY"]; BASE=os.environ["LLM_BASE_URL"].rstrip("/"); MODEL=os.environ["LLM_MODEL"]
 
-          # ITU 规则集（ITU 专家维护）
-          rules = pathlib.Path("itu-review-rules.md").read_text(encoding="utf-8") \
-                  if pathlib.Path("itu-review-rules.md").exists() else "(规则集缺失，请 ITU 专家补 itu-review-rules.md)"
+          # 未配置 BYOK secrets → 显式告警，消除「绿勾=已审」假安全感（fail-open 不静默）
+          if not (KEY and BASE and MODEL):
+              msg=("**📡 LGD ITU 专项审核**\n\n"
+                   "⚠️ 未配置 LLM secrets（LLM_API_KEY / LLM_BASE_URL / LLM_MODEL），AI 审核未执行。"
+                   "本评论仅为提醒，不阻塞合并。配置后评论 `/itu-review` 重跑。")
+              if PR:
+                  subprocess.run(["gh","api","-X","POST",f"repos/{REPO}/issues/{PR}/comments","-f",f"body={msg}"])
+              print("itu-review: BYOK not configured, skip"); sys.exit(0)
 
-          # 递交纪律硬检查：内部注释 / 品牌块 / DOI-pin
+          # ITU 规则集（ITU 专家维护）—— 不依赖 checkout，经 API 取文件内容
+          rules = "(规则集缺失，请 ITU 专家补 itu-review-rules.md)"
           try:
-              base=subprocess.check_output(["gh","api",f"repos/{REPO}/pulls/{PR}/","--jq",".base.sha"],text=True).strip()
-              head=subprocess.check_output(["gh","api",f"repos/{REPO}/pulls/{PR}/","--jq",".head.sha"],text=True).strip()
-              diff=subprocess.check_output(["git","diff",f"{base}...{head}"],text=True)
-          except Exception as e:
-              print("itu-review: diff fail", e); raise SystemExit(0)
+              b64 = subprocess.check_output(
+                  ["gh","api",f"repos/{REPO}/contents/itu-review-rules.md","--jq",".content"],
+                  text=True).strip()
+              rules = base64.b64decode(b64).decode("utf-8", "replace")
+          except Exception:
+              pass
 
-          hard = re.compile(r"(?i)(<!--\s*内部|须过.{0,6}机器闸|专家终审|canonical pin|zenodo\s*doi|synomosai|medxpert)", re.M)
+          # 取 diff（不依赖 actions/checkout，直接用 gh api 取 diff）
+          try:
+              if PR:
+                  diff=subprocess.check_output(
+                      ["gh","api",f"repos/{REPO}/pulls/{PR}",
+                       "-H","Accept: application/vnd.github.v3.diff"],text=True)
+              else:
+                  before, after = os.environ.get("BEFORE"), os.environ.get("AFTER")
+                  diff=subprocess.check_output(
+                      ["gh","api",f"repos/{REPO}/compare/{before}...{after}",
+                       "-H","Accept: application/vnd.github.v3.diff"],text=True)
+          except Exception as e:
+              print("itu-review: diff fail", e); sys.exit(0)
+
+          # 递交纪律硬检查：内部流程注释 / 品牌块 / 权利宣告 / ORCID / DOI-pin / Zenodo
+          hard = re.compile(
+              r"(?i)(<!--\s*(内部|草稿|draft|internal|todo|讨论)"
+              r"|须过.{0,6}机器闸|专家终审"
+              r"|canonical[_\s:=]?"
+              r"|10\.5281/zenodo|doi\.org/10\.5281|zenodo\s*doi"
+              r"|orcid|0000-\d{4}-\d{4}-\d{3}[\dX]"
+              r"|copyright|all rights reserved|版权所有|权利声明|©"
+              r"|synomosai|medxpert)", re.M)
           violations = [l for l in diff.splitlines() if hard.search(l)]
           discipline_note = ""
           if violations:
@@ -81,11 +111,12 @@ jobs:
               resp=json.load(urllib.request.urlopen(req, timeout=120))
               review=resp["choices"][0]["message"]["content"]
           except Exception as e:
-              print("itu-review: LLM fail", e); raise SystemExit(0)
+              print("itu-review: LLM fail", e); sys.exit(0)
 
           msg=f"**📡 LGD ITU 专项审核（ITU 专家规则 · 建议性，非阻塞）**\n\n{review}{discipline_note}\n\n"
           msg+="---\n> 评论 `/itu-review` 重跑。规则集由 ITU 专家维护；对外件最终仍须 Steven 亲手/批准。"
-          subprocess.run(["gh","api","-X","POST",
-              f"repos/{REPO}/issues/{PR}/comments","-f",f"body={msg}"])
+          if PR:
+              subprocess.run(["gh","api","-X","POST",
+                  f"repos/{REPO}/issues/{PR}/comments","-f",f"body={msg}"])
           print("itu-review: posted")
           PY

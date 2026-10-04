@@ -1,0 +1,91 @@
+# L2 · lgd-itu-review —— ITU 专项审核机器人（BYOK · 非阻塞评论）
+# 仅对 ITU 相关仓/PR 生效：仓名含 'itu' 或仓根存在标记文件 `.lgd-itu`。
+# ITU 专家（standards-participation-officer）负责维护本仓的 itu-review-rules.md。
+# 顺带自动执行「递交纪律」硬检查：拦截内部流程注释 / 品牌块 / DOI-pin 搬入对外贡献。
+name: lgd-itu-review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  itu-review:
+    if: >-
+      (contains(github.repository, 'itu') ||
+       github.event_name == 'pull_request') &&
+      (github.event_name == 'pull_request' ||
+       (github.event.issue.pull_request != '' &&
+        contains(github.event.comment.body, '/itu-review')))
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check ITU scope (skip if not ITU-relevant)
+        id: scope
+        run: |
+          if grep -qi "itu" <<< "${{ github.repository }}"; then echo "itu=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ -f ".lgd-itu" ]; then echo "itu=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "itu=0" >> "$GITHUB_OUTPUT"
+      - name: LGD ITU review (BYOK)
+        if: steps.scope.outputs.itu == '1'
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PY'
+          import os, re, json, urllib.request, subprocess, pathlib
+
+          REPO=os.environ["REPO"]; PR=os.environ["PR_NUMBER"]; TOK=os.environ["GH_TOKEN"]
+          KEY=os.environ["LLM_API_KEY"]; BASE=os.environ["LLM_BASE_URL"].rstrip("/"); MODEL=os.environ["LLM_MODEL"]
+
+          # ITU 规则集（ITU 专家维护）
+          rules = pathlib.Path("itu-review-rules.md").read_text(encoding="utf-8") \
+                  if pathlib.Path("itu-review-rules.md").exists() else "(规则集缺失，请 ITU 专家补 itu-review-rules.md)"
+
+          # 递交纪律硬检查：内部注释 / 品牌块 / DOI-pin
+          try:
+              base=subprocess.check_output(["gh","api",f"repos/{REPO}/pulls/{PR}/","--jq",".base.sha"],text=True).strip()
+              head=subprocess.check_output(["gh","api",f"repos/{REPO}/pulls/{PR}/","--jq",".head.sha"],text=True).strip()
+              diff=subprocess.check_output(["git","diff",f"{base}...{head}"],text=True)
+          except Exception as e:
+              print("itu-review: diff fail", e); raise SystemExit(0)
+
+          hard = re.compile(r"(?i)(<!--\s*内部|须过.{0,6}机器闸|专家终审|canonical pin|zenodo\s*doi|synomosai|medxpert)", re.M)
+          violations = [l for l in diff.splitlines() if hard.search(l)]
+          discipline_note = ""
+          if violations:
+              discipline_note = ("\n\n⚠️ **递交纪律告警（全机禁令自动执行）**：检测到疑似内部流程注释 / 品牌块 / DOI-pin 出现在对外贡献 diff 中，"
+                                "按 2026-10-02 禁令须清除后再递交第三方流程仓：\n" +
+                                "".join(f"- `{v.strip()[:120]}`\n" for v in violations[:10]))
+
+          diff=diff[:10000]
+          SYSTEM=(f"你是 ITU 标准参编专项审阅者（ITU 专家负责）。请基于 PR diff 与以下 ITU 规则集，"
+                  f"给出中文专项审阅：1) ITU-T/FG-TIDA 术语与建议书引用格式(如 ITU-T Rec. X.xxx)；"
+                  f"2) 与标准参编合规勾稽；3) 是否适合作为『议题』递交（非我方出版物搬运）。"
+                  f"控制在 300 字内，分条。\n\n### ITU 规则集\n{rules}")
+          body=json.dumps({"model":MODEL,"messages":[
+              {"role":"system","content":SYSTEM},
+              {"role":"user","content":"PR diff:\n"+diff}]})
+          req=urllib.request.Request(BASE+"/chat/completions", data=body.encode(),
+              headers={"Authorization":f"Bearer {KEY}","Content-Type":"application/json"})
+          try:
+              resp=json.load(urllib.request.urlopen(req, timeout=120))
+              review=resp["choices"][0]["message"]["content"]
+          except Exception as e:
+              print("itu-review: LLM fail", e); raise SystemExit(0)
+
+          msg=f"**📡 LGD ITU 专项审核（ITU 专家规则 · 建议性，非阻塞）**\n\n{review}{discipline_note}\n\n"
+          msg+="---\n> 评论 `/itu-review` 重跑。规则集由 ITU 专家维护；对外件最终仍须 Steven 亲手/批准。"
+          subprocess.run(["gh","api","-X","POST",
+              f"repos/{REPO}/issues/{PR}/comments","-f",f"body={msg}"])
+          print("itu-review: posted")
+          PY

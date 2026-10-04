@@ -35,32 +35,44 @@ jobs:
       - name: Scan diff for obvious secrets (advisory only)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
           REPO: ${{ github.repository }}
         run: |
           python3 - <<'PY'
           import os, re, subprocess, json
           try:
-              base = subprocess.check_output(
-                  ["gh","api",f"repos/{os.environ['REPO']}/pulls/{os.environ['PR_NUMBER']}/",
-                   "--jq",".base.sha"], text=True).strip()
-              head = subprocess.check_output(
-                  ["gh","api",f"repos/{os.environ['REPO']}/pulls/{os.environ['PR_NUMBER']}/",
-                   "--jq",".head.sha"], text=True).strip()
-              diff = subprocess.check_output(
-                  ["git","diff",f"{base}...{head}"], text=True)
+              pr = os.environ.get("PR_NUMBER")
+              if pr:
+                  base = subprocess.check_output(
+                      ["gh","api",f"repos/{os.environ['REPO']}/pulls/{pr}/",
+                       "--jq",".base.sha"], text=True).strip()
+                  head = subprocess.check_output(
+                      ["gh","api",f"repos/{os.environ['REPO']}/pulls/{pr}/",
+                       "--jq",".head.sha"], text=True).strip()
+                  diff = subprocess.check_output(["git","diff",f"{base}...{head}"], text=True)
+              else:
+                  before, after = os.environ.get("BEFORE"), os.environ.get("AFTER")
+                  if not (before and after):
+                      raise SystemExit("no diff context")
+                  diff = subprocess.check_output(["git","diff",f"{before}","{after}"], text=True)
           except Exception as e:
-              print("secret-scan: skip (no PR context or git fail):", e); raise SystemExit(0)
-          pat = re.compile(r"(?i)(api[_-]?key|secret|token|password|passwd)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{16,}")
+              print("secret-scan: skip (no diff context):", e); raise SystemExit(0)
+          # 通用密钥/凭证形态 + 主流固定格式（GitHub PAT / AWS AKIA / PEM 私钥）
+          pat = re.compile(
+              r"(?i)(api[_-]?key|secret|token|password|passwd)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{16,}"
+              r"|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{76}|AKIA[0-9A-Z]{16}"
+              r"|-----BEGIN [A-Z ]*PRIVATE KEY-----")
           hits = [l for l in diff.splitlines() if pat.search(l)]
           if hits:
               msg = "**lgd-ci-gate · secret-scan 告警**\n\n疑似密钥/凭证出现在 diff 中，请确认并非真实凭据：\n"
               msg += "".join(f"- `{h.strip()[:120]}`\n" for h in hits[:10])
-              msg += "\n> 非阻塞：不阻止合并，仅提醒。真实密钥请改用 GitHub Secrets。"
-              subprocess.run(["gh","api","-X","POST",
-                  f"repos/{os.environ['REPO']}/issues/{os.environ['PR_NUMBER']}/comments",
-                  "-f", f"body={msg}"])
-              print("secret-scan: flagged", len(hits), "line(s)")
+              msg += "\n> 非阻塞：不阻止合并；真实密钥请改用 GitHub Secrets。建议开启 GitHub 原生 secret scanning / push protection 作兜底。"
+              if pr:
+                  subprocess.run(["gh","api","-X","POST",
+                      f"repos/{os.environ['REPO']}/issues/{pr}/comments","-f",f"body={msg}"])
+              print("secret-scan: FLAGGED", len(hits), "line(s) —— PUSH 模式请立即核查提交历史")
           else:
               print("secret-scan: clean")
           PY

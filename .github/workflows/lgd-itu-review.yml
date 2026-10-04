@@ -23,12 +23,16 @@ jobs:
       pull-requests: write
       contents: read
     steps:
-      - name: Check ITU scope (skip if not ITU-relevant)
+      - name: Check ITU scope (skip if not standards-submission-relevant)
         id: scope
         env:
           REPO: ${{ github.repository }}
         run: |
-          if printf '%s' "$REPO" | grep -qi "itu"; then echo "itu=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # 激活范围（D7 精准扩面）：理论/LGD/标准/治理族自动触发递交纪律硬检查。
+          # 与 deploy_full_governance.py 的 GOVERNED 关键字保持一致（单一真源：robot-review/GOVERNED.md）。
+          if printf '%s' "$REPO" | grep -qiE "itu|lgd|theory|standards|governance|gov-|passport|trust-identity|ai-gov|synomos-ai-skills|agent-trust|nomos-ai|didaskalos|krites|logos-ambassador|fingerprint|provenance|credential-vault|authz-code|identity-verify|sec2-provenance|culpachain|assurability|assayance|terminance|runtigil|premise-and-config-audit|research-quality-gate|publish-quality-gate|continuous-test-review-loop|ai-grader|code-review-standard|traceability-audit-team|audit-trail-keeper"; then
+            echo "itu=1" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           if gh api "repos/$REPO/contents/.lgd-itu" >/dev/null 2>&1; then echo "itu=1" >> "$GITHUB_OUTPUT"; exit 0; fi
           echo "itu=0" >> "$GITHUB_OUTPUT"
       - name: LGD ITU review (BYOK)

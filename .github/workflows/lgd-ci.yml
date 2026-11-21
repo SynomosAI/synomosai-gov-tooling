@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   ci:
-    uses: SynomosAI/ci/.github/workflows/lgd-reusable-ci.yml@1e9f786f516f9c17377d78d0626eb89d68115e66
+    uses: SynomosAI/ci/.github/workflows/lgd-reusable-ci.yml@e1494968cbcd95b854bf7ab8e4d2ed1737ca12dd
     with:
       python-version: "3.11"
       run-tests: false
